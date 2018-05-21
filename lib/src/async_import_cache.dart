@@ -150,4 +150,12 @@ class AsyncImportCache {
               url: displayUrl, logger: _logger);
     });
   }
+
+  /// Clears the cached parse tree for the stylesheet with the given
+  /// [canonicalUrl].
+  ///
+  /// Has no effect if [canonicalUrl] has not been cached.
+  void clearCanonical(Uri canonicalUrl) {
+    _importCache.remove(canonicalUrl);
+  }
 }

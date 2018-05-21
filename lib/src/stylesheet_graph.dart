@@ -2,15 +2,19 @@
 // MIT-style license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+import 'package:collection/collection.dart';
+
 import 'ast/sass.dart';
 import 'import_cache.dart';
 import 'importer.dart';
 import 'visitor/find_imports.dart';
 
-/// A graph of the import relationships between stylesheets.
+/// A graph of the import relationships between stylesheets, available via
+/// [nodes].
 class StylesheetGraph {
   /// A map from canonical URLs to the stylesheet nodes for those URLs.
-  final _nodes = <Uri, _StylesheetNode>{};
+  Map<Uri, StylesheetNode> get nodes => new UnmodifiableMapView(_nodes);
+  final _nodes = <Uri, StylesheetNode>{};
 
   /// The import cache used to load stylesheets.
   final ImportCache importCache;
@@ -30,7 +34,7 @@ class StylesheetGraph {
   /// Returns `true` if the import cache can't find a stylesheet at [url].
   bool modifiedSince(Uri url, DateTime since,
       [Importer baseImporter, Uri baseUrl]) {
-    DateTime transitiveModificationTime(_StylesheetNode node) {
+    DateTime transitiveModificationTime(StylesheetNode node) {
       return _transitiveModificationTimes.putIfAbsent(node.canonicalUrl, () {
         var latest = node.importer.modificationTime(node.canonicalUrl);
         for (var upstream in node.upstream) {
@@ -41,7 +45,7 @@ class StylesheetGraph {
       });
     }
 
-    var node = _add(url, baseImporter, baseUrl);
+    var node = add(url, baseImporter, baseUrl);
     if (node == null) return true;
     return transitiveModificationTime(node).isAfter(since);
   }
@@ -53,7 +57,7 @@ class StylesheetGraph {
   /// import [url] (resolved relative to [baseUrl] if it's passed).
   ///
   /// Returns `null` if the import cache can't find a stylesheet at [url].
-  _StylesheetNode _add(Uri url, [Importer baseImporter, Uri baseUrl]) {
+  StylesheetNode add(Uri url, [Importer baseImporter, Uri baseUrl]) {
     var tuple = importCache.canonicalize(url, baseImporter, baseUrl);
     if (tuple == null) return null;
     var importer = tuple.item1;
@@ -64,7 +68,7 @@ class StylesheetGraph {
       if (stylesheet == null) return null;
 
       var active = new Set<Uri>.from([canonicalUrl]);
-      return new _StylesheetNode(
+      return new StylesheetNode(
           stylesheet,
           importer,
           canonicalUrl,
@@ -75,12 +79,53 @@ class StylesheetGraph {
     });
   }
 
+  /// Re-parses the stylesheet at [canonicalUrl] and updates the dependency graph
+  /// accordingly.
+  ///
+  /// Throws a [StateError] if [canonicalUrl] isn't already in the dependency graph.
+  ///
+  /// Removes the stylesheet from the graph entirely and returns `null` if the
+  /// stylesheet's importer can no longer import it.
+  StylesheetNode reload(Uri canonicalUrl) {
+    var node = _nodes[canonicalUrl];
+    if (node == null) {
+      throw new StateError("$canonicalUrl is not in the dependency graph.");
+    }
+
+    importCache.clearCanonical(canonicalUrl);
+    var stylesheet = importCache.importCanonical(node.importer, canonicalUrl);
+    if (stylesheet == null) {
+      remove(canonicalUrl);
+      return null;
+    }
+
+    var active = new Set.of([canonicalUrl]);
+    node._replaceUpstream(findImports(stylesheet)
+        .map((import) => _nodeFor(
+            Uri.parse(import.url), node.importer, canonicalUrl, active))
+        .where((node) => node != null));
+    return node;
+  }
+
+  /// Removes the stylesheet at [canonicalUrl] from the stylesheet graph.
+  ///
+  /// Throws a [StateError] if [canonicalUrl] isn't already in the dependency graph.
+  void remove(Uri canonicalUrl) {
+    var node = _nodes[canonicalUrl];
+    if (node == null) {
+      throw new StateError("$canonicalUrl is not in the dependency graph.");
+    }
+
+    importCache.clearCanonical(canonicalUrl);
+    node._remove();
+  }
+
   /// Returns the [StylesheetNode] for the stylesheet at the given [url], which
   /// appears within [baseUrl] imported by [baseImporter].
   ///
   /// The [active] set should contain the canonical URLs that are currently
   /// being imported. It's used to detect circular imports.
-  _StylesheetNode _nodeFor(
+  StylesheetNode _nodeFor(
       Uri url, Importer baseImporter, Uri baseUrl, Set<Uri> active) {
     var tuple = importCache.canonicalize(url, baseImporter, baseUrl);
 
@@ -102,7 +147,7 @@ class StylesheetGraph {
     if (stylesheet == null) return null;
 
     active.add(canonicalUrl);
-    var node = new _StylesheetNode(
+    var node = new StylesheetNode(
         stylesheet,
         importer,
         canonicalUrl,
@@ -122,7 +167,7 @@ class StylesheetGraph {
 ///
 /// A [StylesheetNode] is immutable except for its downstream nodes. When the
 /// stylesheet itself changes, a new node should be generated.
-class _StylesheetNode {
+class StylesheetNode {
   /// The parsed stylesheet.
   final Stylesheet stylesheet;
 
@@ -133,27 +178,45 @@ class _StylesheetNode {
   final Uri canonicalUrl;
 
   /// The stylesheets that [stylesheet] imports.
-  final List<_StylesheetNode> upstream;
+  List<StylesheetNode> get upstream => _upstream;
+  List<StylesheetNode> _upstream;
 
   /// The stylesheets that import [stylesheet].
-  ///
-  /// This is automatically populated when new [_StylesheetNode]s are created
-  /// that list this as an upstream node.
-  final downstream = new Set<_StylesheetNode>();
+  Set<StylesheetNode> get downstream => new UnmodifiableSetView(_downstream);
+  final _downstream = new Set<StylesheetNode>();
 
-  _StylesheetNode(this.stylesheet, this.importer, this.canonicalUrl,
-      Iterable<_StylesheetNode> upstream)
-      : upstream = new List.unmodifiable(upstream) {
+  StylesheetNode(this.stylesheet, this.importer, this.canonicalUrl,
+      Iterable<StylesheetNode> upstream)
+      : _upstream = new List.unmodifiable(upstream) {
     for (var node in upstream) {
-      node.downstream.add(this);
+      node._downstream.add(this);
     }
+  }
+
+  /// Sets [newUpstream] as the new value of [upstream] and adjusts upstream
+  /// nodes' [downstream] fields accordingly.
+  void _replaceUpstream(Iterable<StylesheetNode> newUpstream) {
+    var oldUpstream = new Set.of(upstream);
+    var newUpstreamSet = new Set.of(newUpstream);
+
+    for (var removed in oldUpstream.difference(newUpstreamSet)) {
+      var wasRemoved = removed._downstream.remove(this);
+      assert(wasRemoved);
+    }
+
+    for (var added in newUpstreamSet.difference(oldUpstream)) {
+      var wasAdded = added._downstream.add(this);
+      assert(wasAdded);
+    }
+
+    _upstream = new List.unmodifiable(newUpstreamSet);
   }
 
   /// Removes [this] as a downstream node from all the upstream nodes that it
   /// imports.
-  void remove() {
+  void _remove() {
     for (var node in upstream) {
-      var wasRemoved = node.downstream.remove(this);
+      var wasRemoved = node._downstream.remove(this);
       assert(wasRemoved);
     }
   }
