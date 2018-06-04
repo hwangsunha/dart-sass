@@ -161,6 +161,9 @@ class ExecutableOptions {
   /// Whether to update only files that have changed since the last compilation.
   bool get update => _options['update'] as bool;
 
+  /// Whether to continuously watch the filesystem for changes.
+  bool get watch => _options['watch'] as bool;
+
   /// A map from source paths to the destination paths where the compiled CSS
   /// should be written.
   ///
@@ -205,6 +208,8 @@ class ExecutableOptions {
           _fail("Only one argument is allowed with --stdin.");
         } else if (update) {
           _fail("--update is not allowed with --stdin.");
+        } else if (watch) {
+          _fail("--watch is not allowed with --stdin.");
         }
         return {null: _options.rest.isEmpty ? null : _options.rest.first};
       } else if (_options.rest.length > 2) {
@@ -212,8 +217,12 @@ class ExecutableOptions {
       } else {
         var source = _options.rest.first == '-' ? null : _options.rest.first;
         var destination = _options.rest.length == 1 ? null : _options.rest.last;
-        if (update && destination == null) {
-          _fail("--update is not allowed when printing to stdout.");
+        if (destination == null) {
+          if (update) {
+            _fail("--update is not allowed when printing to stdout.");
+          } else if (watch) {
+            _fail("--watch is not allowed when printing to stdout.");
+          }
         }
 
         return {source: destination};

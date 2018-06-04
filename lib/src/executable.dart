@@ -126,7 +126,7 @@ Future<String> _loadVersion() async {
 Future _compileStylesheet(ExecutableOptions options, StylesheetGraph graph,
     String source, String destination) async {
   var importer = new FilesystemImporter('.');
-  if (options.update) {
+  if (options.update || options.watch) {
     try {
       if (source != null &&
           destination != null &&
@@ -165,7 +165,7 @@ Future _compileStylesheet(ExecutableOptions options, StylesheetGraph graph,
     writeFile(destination, css + "\n");
   }
 
-  if (!options.update || options.quiet) return;
+  if (options.quiet || (!options.update && !options.watch)) return;
   var buffer = new StringBuffer();
   if (options.color) buffer.write('\u001b[32m');
   buffer.write('Compiled ${source ?? 'stdin'} to $destination.');
